@@ -28,6 +28,7 @@ import (
 	"github.com/pingcap/tidb/util/charset"
 	"github.com/pingcap/tidb/util/types"
 	"github.com/pingcap/tipb/go-tipb"
+	"reflect"
 )
 
 // AggregationFunction stands for aggregate functions.
@@ -319,6 +320,7 @@ func (af *aggFunction) streamUpdateSum(row []types.Datum, ectx context.Context) 
 	if err != nil {
 		return errors.Trace(err)
 	}
+	log.Warning(a.String(), reflect.TypeOf(a), value.GetValue())
 	if value.IsNull() {
 		return nil
 	}

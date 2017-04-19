@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/util/testkit"
 	"github.com/pingcap/tidb/util/testleak"
 	"github.com/pingcap/tidb/util/types"
+	"github.com/ngaut/log"
 )
 
 type MockExec struct {
@@ -387,6 +388,7 @@ func (s *testSuite) TestStreamAgg(c *C) {
 			row, err = e.Next()
 			c.Check(err, IsNil)
 			c.Check(row, NotNil)
+			log.Warning(ca.aggFunc.String())
 			c.Assert(fmt.Sprintf("%v", row.Data[0].GetValue()), Equals, res)
 		}
 	}
