@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/parser/opcode"
 	"github.com/pingcap/tidb/util/types"
+	"github.com/pingcap/tidb/mysql"
 )
 
 var (
@@ -204,7 +205,104 @@ type compareFunctionClass struct {
 }
 
 func (c *compareFunctionClass) getFunction(args []Expression, ctx context.Context) (builtinFunc, error) {
-	return &builtinCompareSig{newBaseBuiltinFunc(args, ctx), c.op}, errors.Trace(c.verifyArgs(args))
+	var bt builtinFunc
+	tc0, tc1 := args[0].GetType().ToClass(), args[1].GetType().ToClass()
+	if tc0 == types.ClassInt && tc1 == types.ClassInt {
+		bt = &builtinCompareIntCastSig{newBaseBuiltinFunc(args, ctx), c.op}
+	} else if tc0 == types.ClassInt || tc1 == types.ClassInt { // enum('1', '2', '3') < 1
+			args[0] = NewStringToRealCastFunc(types.NewFieldType(mysql.TypeDouble), args[0].Clone(), ctx)
+			args[1] = NewIntToRealCastFunc(types.NewFieldType(mysql.TypeDouble), args[1].Clone(), ctx)
+		bt = &builtinCompareRealCastSig{newBaseBuiltinFunc(args, ctx), c.op}
+	}else {
+		bt = &builtinCompareSig{newBaseBuiltinFunc(args, ctx), c.op}
+	}
+	return bt, errors.Trace(c.verifyArgs(args))
+}
+
+type builtinCompareIntCastSig struct {
+	baseBuiltinFunc
+	op opcode.Op
+}
+
+func (s *builtinCompareIntCastSig) eval(row []types.Datum) (d types.Datum, err error){
+	args, err := s.evalArgs(row)
+	if err != nil {
+		return types.Datum{}, errors.Trace(err)
+	}
+	var a, b = args[0], args[1]
+	if a.IsNull() || b.IsNull() {
+		if s.op == opcode.NullEQ {
+			if a.IsNull() && b.IsNull() {
+				d.SetInt64(oneI64)
+			} else {
+				d.SetInt64(zeroI64)
+			}
+		}
+		return
+	}
+	ret := resOfCmp(types.CompareInt64(a.GetInt64(), b.GetInt64()), s.op)
+	if ret == -1 {
+		d.SetInt64(zeroI64)
+		return d, errInvalidOperation.Gen("invalid op %v in comparison operation", s.op)
+	}
+	d.SetInt64(ret)
+	return
+}
+
+
+type builtinCompareRealCastSig struct {
+	baseBuiltinFunc
+	op opcode.Op
+}
+
+func (s *builtinCompareRealCastSig) eval(row []types.Datum) (d types.Datum, err error){
+	args, err := s.evalArgs(row)
+	if err != nil {
+		return types.Datum{}, errors.Trace(err)
+	}
+	var a, b = args[0], args[1]
+	if a.IsNull() || b.IsNull() {
+		if s.op == opcode.NullEQ {
+			if a.IsNull() && b.IsNull() {
+				d.SetInt64(oneI64)
+			} else {
+				d.SetInt64(zeroI64)
+			}
+		}
+		return
+	}
+	ret := resOfCmp(types.CompareFloat64(a.GetFloat64(), b.GetFloat64()), s.op)
+	if ret == -1 {
+		d.SetInt64(zeroI64)
+		return d, errInvalidOperation.Gen("invalid op %v in comparison operation", s.op)
+	}
+	d.SetInt64(ret)
+	return
+}
+
+func resOfCmp(res int, op opcode.Op) int64 {
+	var ret bool
+	switch op {
+	case opcode.LT:
+		ret = res < 0
+	case opcode.LE:
+		ret = res <= 0
+	case opcode.EQ, opcode.NullEQ:
+		ret = res == 0
+	case opcode.GT:
+		ret = res > 0
+	case opcode.GE:
+		ret = res >= 0
+	case opcode.NE:
+		ret = res != 0
+	default:
+		return -1
+	}
+	res = 1
+	if !ret {
+		res = 0
+	}
+	return int64(res)
 }
 
 type builtinCompareSig struct {

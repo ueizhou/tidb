@@ -344,6 +344,25 @@ func NewCastFunc(tp *types.FieldType, arg Expression, ctx context.Context) *Scal
 	}
 }
 
+func NewStringToRealCastFunc(tp *types.FieldType,arg Expression, ctx context.Context) *ScalarFunction{
+	bt := &builtinString2RealCastSig{newBaseBuiltinFunc([]Expression{arg}, ctx), tp}
+	return &ScalarFunction{
+		FuncName: model.NewCIStr(ast.Cast),
+		RetType:  tp,
+		Function: bt,
+	}
+}
+
+
+func NewIntToRealCastFunc(tp *types.FieldType,arg Expression, ctx context.Context) *ScalarFunction{
+	bt := &builtinInt2RealCastSig{newBaseBuiltinFunc([]Expression{arg}, ctx), tp}
+	return &ScalarFunction{
+		FuncName: model.NewCIStr(ast.Cast),
+		RetType:  tp,
+		Function: bt,
+	}
+}
+
 // NewValuesFunc creates a new values function.
 func NewValuesFunc(offset int, retTp *types.FieldType, ctx context.Context) *ScalarFunction {
 	fc := &valuesFunctionClass{baseFunctionClass{ast.Values, 0, 0}, offset}

@@ -20,6 +20,7 @@ import (
 	"github.com/pingcap/tidb/context"
 	"github.com/pingcap/tidb/mysql"
 	"github.com/pingcap/tidb/util/types"
+	"strconv"
 )
 
 var (
@@ -156,6 +157,36 @@ func (b *builtinCastSig) eval(row []types.Datum) (d types.Datum, err error) {
 		return d.ConvertTo(b.ctx.GetSessionVars().StmtCtx, b.tp)
 	}
 	return d, errors.Errorf("unknown cast type - %v", b.tp)
+}
+
+type builtinString2RealCastSig struct {
+	baseBuiltinFunc
+
+	tp *types.FieldType
+}
+
+func (b *builtinString2RealCastSig) eval(row []types.Datum) (d types.Datum, err error) {
+	args, err := b.evalArgs(row)
+	if err != nil {
+		return types.Datum{}, errors.Trace(err)
+	}
+	val, _ := strconv.ParseFloat(args[0].GetString(), 64)
+	d.SetFloat64(val)
+	return d, nil
+}
+type builtinInt2RealCastSig struct {
+	baseBuiltinFunc
+
+	tp *types.FieldType
+}
+
+func (b *builtinInt2RealCastSig) eval(row []types.Datum) (d types.Datum, err error) {
+	args, err := b.evalArgs(row)
+	if err != nil {
+		return types.Datum{}, errors.Trace(err)
+	}
+	d.SetFloat64(float64(args[0].GetInt64()))
+	return d, nil
 }
 
 type setVarFunctionClass struct {
