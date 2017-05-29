@@ -82,6 +82,8 @@ func (b *executorBuilder) build(p plan.Plan) Executor {
 		return b.buildSet(v)
 	case *plan.Sort:
 		return b.buildSort(v)
+	case *plan.TopN:
+		return b.buildTopN(v)
 	case *plan.Union:
 		return b.buildUnion(v)
 	case *plan.Update:
@@ -94,6 +96,8 @@ func (b *executorBuilder) build(p plan.Plan) Executor {
 		return b.buildMergeJoin(v)
 	case *plan.PhysicalHashSemiJoin:
 		return b.buildSemiJoin(v)
+	case *plan.PhysicalIndexJoin:
+		return b.buildIndexJoin(v)
 	case *plan.Selection:
 		return b.buildSelection(v)
 	case *plan.PhysicalAggregation:
@@ -280,17 +284,25 @@ func (b *executorBuilder) buildLoadData(v *plan.LoadData) Executor {
 		b.err = errors.Errorf("Can not get table %d", v.Table.TableInfo.ID)
 		return nil
 	}
+	insertVal := &InsertValues{ctx: b.ctx, Table: tbl, Columns: v.Columns}
+	tableCols := tbl.WritableCols()
+	columns, err := insertVal.getColumns(tableCols)
+	if err != nil {
+		b.err = errors.Trace(err)
+		return nil
+	}
 
 	return &LoadData{
 		IsLocal: v.IsLocal,
 		loadDataInfo: &LoadDataInfo{
-			row:        make([]types.Datum, len(tbl.Cols())),
-			insertVal:  &InsertValues{ctx: b.ctx, Table: tbl},
+			row:        make([]types.Datum, len(columns)),
+			insertVal:  insertVal,
 			Path:       v.Path,
 			Table:      tbl,
 			FieldsInfo: v.FieldsInfo,
 			LinesInfo:  v.LinesInfo,
 			Ctx:        b.ctx,
+			columns:    columns,
 		},
 	}
 }
@@ -346,6 +358,13 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		us.desc = x.desc
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
+		us.columns = x.Columns
+		us.buildAndSortAddedRows(x.table, x.asName)
+	case *TableReaderExecutor:
+		us.desc = x.desc
+		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
+		us.conditions = v.Conditions
+		us.columns = x.columns
 		us.buildAndSortAddedRows(x.table, x.asName)
 	case *XSelectIndexExec:
 		us.desc = x.desc
@@ -359,6 +378,35 @@ func (b *executorBuilder) buildUnionScanExec(v *plan.PhysicalUnionScan) Executor
 		}
 		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
 		us.conditions = v.Conditions
+		us.columns = x.columns
+		us.buildAndSortAddedRows(x.table, x.asName)
+	case *IndexReaderExecutor:
+		us.desc = x.desc
+		for _, ic := range x.index.Columns {
+			for i, col := range x.schema.Columns {
+				if col.ColName.L == ic.Name.L {
+					us.usedIndex = append(us.usedIndex, i)
+					break
+				}
+			}
+		}
+		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
+		us.conditions = v.Conditions
+		us.columns = x.columns
+		us.buildAndSortAddedRows(x.table, x.asName)
+	case *IndexLookUpExecutor:
+		us.desc = x.desc
+		for _, ic := range x.index.Columns {
+			for i, col := range x.schema.Columns {
+				if col.ColName.L == ic.Name.L {
+					us.usedIndex = append(us.usedIndex, i)
+					break
+				}
+			}
+		}
+		us.dirty = getDirtyDB(b.ctx).getDirtyTable(x.table.Meta().ID)
+		us.conditions = v.Conditions
+		us.columns = x.columns
 		us.buildAndSortAddedRows(x.table, x.asName)
 	default:
 		// The mem table will not be written by sql directly, so we can omit the union scan to avoid err reporting.
@@ -552,7 +600,7 @@ func (b *executorBuilder) buildTableScan(v *plan.PhysicalTableScan) Executor {
 	}
 	table, _ := b.is.TableByID(v.Table.ID)
 	client := b.ctx.GetClient()
-	supportDesc := client.SupportRequestType(kv.ReqTypeSelect, kv.ReqSubTypeDesc)
+	supportDesc := client.IsRequestTypeSupported(kv.ReqTypeSelect, kv.ReqSubTypeDesc)
 	e := &XSelectTableExec{
 		tableInfo:   v.Table,
 		ctx:         b.ctx,
@@ -582,7 +630,7 @@ func (b *executorBuilder) buildIndexScan(v *plan.PhysicalIndexScan) Executor {
 	}
 	table, _ := b.is.TableByID(v.Table.ID)
 	client := b.ctx.GetClient()
-	supportDesc := client.SupportRequestType(kv.ReqTypeIndex, kv.ReqSubTypeDesc)
+	supportDesc := client.IsRequestTypeSupported(kv.ReqTypeIndex, kv.ReqSubTypeDesc)
 	e := &XSelectIndexExec{
 		tableInfo:            v.Table,
 		ctx:                  b.ctx,
@@ -642,6 +690,18 @@ func (b *executorBuilder) buildSort(v *plan.Sort) Executor {
 		}
 	}
 	return &sortExec
+}
+
+func (b *executorBuilder) buildTopN(v *plan.TopN) Executor {
+	sortExec := SortExec{
+		baseExecutor: newBaseExecutor(v.Schema(), b.ctx, b.build(v.Children()[0])),
+		ByItems:      v.ByItems,
+		schema:       v.Schema(),
+	}
+	return &TopnExec{
+		SortExec: sortExec,
+		limit:    &plan.Limit{Count: v.Count, Offset: v.Offset},
+	}
 }
 
 func (b *executorBuilder) buildNestedLoopJoin(v *plan.PhysicalHashJoin) *NestedLoopJoinExec {
@@ -832,6 +892,20 @@ func (b *executorBuilder) constructDAGReq(plans []plan.PhysicalPlan) *tipb.DAGRe
 	return dagReq
 }
 
+func (b *executorBuilder) buildIndexJoin(v *plan.PhysicalIndexJoin) Executor {
+	return &IndexLookUpJoin{
+		baseExecutor:    newBaseExecutor(v.Schema(), b.ctx, b.build(v.Children()[0])),
+		innerExec:       b.build(v.Children()[1]).(DataReader),
+		outerJoinKeys:   v.OuterJoinKeys,
+		innerJoinKeys:   v.InnerJoinKeys,
+		outer:           v.Outer,
+		leftConditions:  v.LeftConditions,
+		rightConditions: v.RightConditions,
+		otherConditions: v.OtherConditions,
+		defaultValues:   v.DefaultValues,
+	}
+}
+
 func (b *executorBuilder) buildTableReader(v *plan.PhysicalTableReader) Executor {
 	dagReq := b.constructDAGReq(v.TablePlans)
 	if b.err != nil {
@@ -849,6 +923,7 @@ func (b *executorBuilder) buildTableReader(v *plan.PhysicalTableReader) Executor
 		keepOrder: ts.KeepOrder,
 		desc:      ts.Desc,
 		ranges:    ts.Ranges,
+		columns:   ts.Columns,
 	}
 
 	for i := range v.Schema().Columns {
@@ -876,9 +951,10 @@ func (b *executorBuilder) buildIndexReader(v *plan.PhysicalIndexReader) Executor
 		keepOrder: !is.OutOfOrder,
 		desc:      is.Desc,
 		ranges:    is.Ranges,
+		columns:   is.Columns,
 	}
 
-	for _, col := range v.Schema().Columns {
+	for _, col := range v.OutputColumns {
 		dagReq.OutputOffsets = append(dagReq.OutputOffsets, uint32(col.Index))
 	}
 
@@ -913,6 +989,7 @@ func (b *executorBuilder) buildIndexLookUpReader(v *plan.PhysicalIndexLookUpRead
 		desc:         is.Desc,
 		ranges:       is.Ranges,
 		tableRequest: tableReq,
+		columns:      is.Columns,
 	}
 	return e
 }

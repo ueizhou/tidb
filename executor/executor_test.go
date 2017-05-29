@@ -300,7 +300,6 @@ func (s *testSuite) TestSelectOrderBy(c *C) {
 	r.Check(testkit.Rows("1 hello"))
 
 	// Test limit + order by
-	tk.MustExec("begin")
 	for i := 3; i <= 10; i += 1 {
 		tk.MustExec(fmt.Sprintf("insert INTO select_order_test VALUES (%d, \"zz\");", i))
 	}
@@ -432,17 +431,15 @@ func (s *testSuite) TestUnion(c *C) {
 	}()
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
-	testSQL := `select 1 union select 0;`
-	tk.MustExec(testSQL)
 
-	testSQL = `drop table if exists union_test; create table union_test(id int);`
+	testSQL := `drop table if exists union_test; create table union_test(id int);`
 	tk.MustExec(testSQL)
 
 	testSQL = `drop table if exists union_test;`
 	tk.MustExec(testSQL)
 	testSQL = `create table union_test(id int);`
 	tk.MustExec(testSQL)
-	testSQL = `insert union_test values (1),(2); select id from union_test union select 1;`
+	testSQL = `insert union_test values (1),(2)`
 	tk.MustExec(testSQL)
 
 	testSQL = `select id from union_test union select id from union_test;`
@@ -953,6 +950,43 @@ func (s *testSuite) TestBuiltin(c *C) {
 	result.Check(testkit.Rows("1"))
 }
 
+func (s *testSuite) TestJSON(c *C) {
+	defer func() {
+		s.cleanEnv(c)
+		testleak.AfterTest(c)()
+	}()
+	tk := testkit.NewTestKit(c, s.store)
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists test_json")
+	tk.MustExec("create table test_json (id int, a json)")
+	tk.MustExec(`insert into test_json (id, a) values (1, '{"a":[1,"2",{"aa":"bb"},4],"b":true}')`)
+	tk.MustExec(`insert into test_json (id, a) values (2, "null")`)
+	tk.MustExec(`insert into test_json (id, a) values (3, null)`)
+	tk.MustExec(`insert into test_json (id, a) values (4, 'true')`)
+	tk.MustExec(`insert into test_json (id, a) values (5, '3')`)
+	tk.MustExec(`insert into test_json (id, a) values (5, '4.0')`)
+	tk.MustExec(`insert into test_json (id, a) values (6, '"string"')`)
+
+	var result *testkit.Result
+	result = tk.MustQuery(`select tj.a from test_json tj order by tj.id`)
+	result.Check(testkit.Rows(`{"a":[1,"2",{"aa":"bb"},4],"b":true}`, "null", "<nil>", "true", "3", "4", `"string"`))
+
+	// check json_type function
+	result = tk.MustQuery(`select json_type(a) from test_json tj order by tj.id`)
+	result.Check(testkit.Rows("OBJECT", "NULL", "<nil>", "BOOLEAN", "INTEGER", "DOUBLE", "STRING"))
+
+	// check json compare with primitives.
+	result = tk.MustQuery(`select a from test_json tj where a = 3`)
+	result.Check(testkit.Rows("3"))
+	result = tk.MustQuery(`select a from test_json tj where a = 4.0`)
+	result.Check(testkit.Rows("4"))
+	result = tk.MustQuery(`select a from test_json tj where a = true`)
+	result.Check(testkit.Rows("true"))
+	result = tk.MustQuery(`select a from test_json tj where a = "string"`)
+	result.Check(testkit.Rows(`"string"`))
+}
+
 func (s *testSuite) TestToPBExpr(c *C) {
 	defer func() {
 		s.cleanEnv(c)
@@ -1131,7 +1165,9 @@ func (s *testSuite) TestAdapterStatement(c *C) {
 }
 
 func (s *testSuite) TestPointGet(c *C) {
-	defer testleak.AfterTest(c)()
+	defer func() {
+		testleak.AfterTest(c)()
+	}()
 	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use mysql")
 	ctx := tk.Se.(context.Context)
@@ -1294,7 +1330,6 @@ func (s *testSuite) TestScanControlSelection(c *C) {
 
 func (s *testSuite) TestSimpleDAG(c *C) {
 	defer func() {
-		plan.UseDAGPlanBuilder = false
 		s.cleanEnv(c)
 		testleak.AfterTest(c)()
 	}()
@@ -1303,7 +1338,6 @@ func (s *testSuite) TestSimpleDAG(c *C) {
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int primary key, b int, c int)")
 	tk.MustExec("insert into t values (1, 1, 1), (2, 1, 1), (3, 1, 2), (4, 2, 3)")
-	plan.UseDAGPlanBuilder = true
 	tk.MustQuery("select a from t").Check(testkit.Rows("1", "2", "3", "4"))
 	tk.MustQuery("select * from t where a = 4").Check(testkit.Rows("4 2 3"))
 	tk.MustQuery("select a from t limit 1").Check(testkit.Rows("1"))
